@@ -1,0 +1,160 @@
+on:
+  workflow_dispatch:
+    inputs:
+      timerange:
+        description: '[yyyymm] Target month to download/backfill'
+        required: true
+  repository_dispatch:
+    types:
+      - backfill
+      - chain
+
+permissions:
+  contents: write
+  repository-projects: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.client_payload.timerange || github.event.inputs.timerange }}
+  cancel-in-progress: false
+
+env:
+  timerange: ${{ github.event.client_payload.timerange || github.event.inputs.timerange }}
+  cutoff: 2020
+
+jobs:
+  info:
+    runs-on: ubuntu-latest
+    outputs:
+      config: "${{ steps.info.outputs.config }}"
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@main
+        with:
+          fetch-depth: 1
+      - id: info
+        shell: bash
+        run: |
+          CONFIG=$(jq -c -r '[.[]|select(.long|not)]' .github/config/config.json)
+          echo "config=${CONFIG}" | tee -a ${GITHUB_OUTPUT}
+  backfill:
+    runs-on: ubuntu-latest
+    needs: info
+    if: needs.info.outputs.config != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.info.outputs.config) }}
+        # exchange, stake, timeframes, tradingmode, long
+    concurrency:
+      group: ${{ github.workflow }}-${{ matrix.stake }}
+      cancel-in-progress: false
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@main
+        with:
+          fetch-depth: 1
+          repository: xaemiphor/ft-historical
+
+      - name: Git checkout
+        uses: actions/checkout@main
+        continue-on-error: true
+        with:
+          fetch-depth: 1
+          ref: "${{ matrix.tradingmode }}/${{ matrix.stake }}/${{ env.timerange }}"
+          path: user_data/data/${{ matrix.exchange }}
+
+      - name: (pre)list-data --show-timerange
+        shell: bash
+        env:
+          EXCHANGE: ${{ matrix.exchange }}
+          STAKE: ${{ matrix.stake }}
+          TRADINGMODE: ${{ matrix.tradingmode }}
+        run: |
+          mkdir artifacts
+          echo "::group::(pre)list-data --show-timerange"
+          bash freqtrade.sh list-data --show-timerange --exchange ${{ matrix.exchange }}
+          echo "::endgroup::"
+          if [[ "${{ matrix.exchange }}" == "kraken" && "${{ github.event.action || '' }}" == "backfill" ]]; then
+            echo "::group::Purge generated candles to get freqtrade to resume building trades files"
+            sudo find user_data/data/${{ matrix.exchange }} -mindepth 1 -maxdepth 1 -type f -not -name '*-trades.feather' -delete
+            echo "::endgroup::"
+          fi
+
+      - name: Download
+        id: download1
+        shell: bash
+        continue-on-error: true
+        timeout-minutes: 330
+        env:
+          EXCHANGE: ${{ matrix.exchange }}
+          STAKE: ${{ matrix.stake }}
+          TRADINGMODE: ${{ matrix.tradingmode }}
+        run: |
+          date +%s | tee -a artifacts/start-${{ matrix.exchange }}-${{ matrix.stake }}-${{ env.timerange }}
+          echo "::group::download-data"
+          ENDRANGE=$(date -u +%Y%m -d '${{ env.timerange }}01 + 1 month')
+          bash freqtrade.sh download-data --exchange ${{ matrix.exchange }} -p '.*/${{ matrix.stake }}' --timerange ${{ env.timerange }}01-${ENDRANGE}01 --timeframes ${{ matrix.timeframes }} ${{ matrix.extra || '' }}
+          echo "::endgroup::"
+          date +%s | tee -a artifacts/end-${{ matrix.exchange }}-${{ matrix.stake }}-${{ env.timerange }}
+
+      - name: (post)list-data --show-timerange
+        shell: bash
+        env:
+          EXCHANGE: ${{ matrix.exchange }}
+          STAKE: ${{ matrix.stake }}
+          TRADINGMODE: ${{ matrix.tradingmode }}
+        run: |
+          echo "::group::(post)list-data --show-timerange"
+          bash freqtrade.sh list-data --show-timerange --exchange ${{ matrix.exchange }}
+          echo "::endgroup::"
+
+      - name: Push changes
+        shell: bash
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          sudo chown -R $(id -u):$(id -g) user_data/data/${{ matrix.exchange }}
+          cd user_data/data/${{ matrix.exchange }}
+          if [[ $(git status --porcelain . | wc -l) -gt 0 ]]; then
+            git add .
+            git commit -m "ci: Autoupdate $(date -u +'%F %T')"
+            git push -u origin "$(git branch --show-current):${{ matrix.tradingmode }}/${{ matrix.stake }}/${{ env.timerange }}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.run_number }}-${{ github.run_attempt }}-${{ matrix.stake }}-${{ env.timerange }}
+          path: "${{ github.workspace }}/artifacts"
+          retention-days: 1
+
+  dispatch:
+    runs-on: ubuntu-latest
+    needs: [backfill]
+    steps:
+      - name: Download all workflow run artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: ${{ github.run_number }}-${{ github.run_attempt }}-*
+          merge-multiple: true
+
+      - id: info
+        shell: bash
+        run: |
+          started=$(find artifacts -type f | grep 'start-' | wc -l)
+          completed=$(find artifacts -type f | grep 'end-' | wc -l)
+          if [[ ${started} -eq ${completed} ]]; then
+            timerange=$(date -u +%Y%m -d '${{ env.timerange }}01 - 1 month')
+          else
+            timerange=${{ env.timerange }}
+          fi
+          if [[ "${timerange}" != ${{ env.cutoff }}* ]]; then
+            echo "timerange=${timerange}" | tee -a ${GITHUB_OUTPUT}
+          fi
+      - name: Repository Dispatch
+        uses: peter-evans/repository-dispatch@main
+        if: steps.info.outputs.timerange != '' && (github.event.action == 'chain' || github.event_name == 'workflow_dispatch' )
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          event-type: chain
+          client-payload: '{"timerange": "${{ steps.info.outputs.timerange }}"}'

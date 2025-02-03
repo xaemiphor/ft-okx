@@ -1,0 +1,149 @@
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/update.yml
+
+permissions:
+  contents: write
+  repository-projects: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  #info:
+  #  runs-on: ubuntu-latest
+  #  outputs:
+  #    config: "${{ steps.info.outputs.config }}"
+  #  steps:
+  #    - name: Git checkout
+  #      uses: actions/checkout@main
+  #      with:
+  #        fetch-depth: 1
+  #    - id: info
+  #      shell: bash
+  #      run: |
+  #        CONFIG=$(jq -c -r '.' .github/config/config.json)
+  #        echo "config=${CONFIG}" | tee -a ${GITHUB_OUTPUT}
+  #update:
+  #  runs-on: ubuntu-latest
+  #  needs: info
+  #  strategy:
+  #    fail-fast: false
+  #    matrix:
+  #      include: ${{ fromJSON(needs.info.outputs.config) }}
+  #      # exchange, stake, timeframes, tradingmode
+  #  steps:
+  #    - id: info
+  #      shell: bash
+  #      run: |
+  #        echo "timerange=$(date -u +%Y%m)" | tee -a ${GITHUB_OUTPUT}
+
+  #    - name: Git checkout
+  #      uses: actions/checkout@main
+  #      with:
+  #        fetch-depth: 1
+
+  #    - name: Git checkout
+  #      uses: actions/checkout@main
+  #      continue-on-error: true
+  #      with:
+  #        fetch-depth: 1
+  #        ref: "${{ matrix.tradingmode }}/${{ matrix.exchange }}/${{ matrix.stake }}/${{ steps.info.outputs.timerange }}"
+  #        path: user_data/data/${{ matrix.exchange }}
+
+  #    - name: (pre)list-data --show-timerange
+  #      shell: bash
+  #      env:
+  #        EXCHANGE: ${{ matrix.exchange }}
+  #        STAKE: ${{ matrix.stake }}
+  #        TRADINGMODE: ${{ matrix.tradingmode }}
+  #      run: |
+  #        echo "::group::(pre)list-data --show-timerange"
+  #        bash freqtrade.sh list-data --show-timerange --exchange ${{ matrix.exchange }}
+  #        echo "::endgroup::"
+  #        if [[ "${{ matrix.exchange }}" == "kraken" ]]; then
+  #          echo "::group::Purge generated candles to get freqtrade to resume building trades files"
+  #          sudo find user_data/data/${{ matrix.exchange }} -mindepth 1 -maxdepth 1 -type f -not -name '*-trades.feather' -delete
+  #          echo "::endgroup::"
+  #        fi
+
+  #    - name: Download
+  #      shell: bash
+  #      continue-on-error: true
+  #      timeout-minutes: 330
+  #      env:
+  #        EXCHANGE: ${{ matrix.exchange }}
+  #        STAKE: ${{ matrix.stake }}
+  #        TRADINGMODE: ${{ matrix.tradingmode }}
+  #      run: |
+  #        echo "::group::download-data"
+  #        bash freqtrade.sh download-data --exchange ${{ matrix.exchange }} -p '.*/${{ matrix.stake }}' --timerange ${{ steps.info.outputs.timerange }}01- --timeframes ${{ matrix.timeframes }} ${{ matrix.extra || '' }}
+  #        echo "::endgroup::"
+
+  #    - name: (post)list-data --show-timerange
+  #      shell: bash
+  #      env:
+  #        EXCHANGE: ${{ matrix.exchange }}
+  #        STAKE: ${{ matrix.stake }}
+  #        TRADINGMODE: ${{ matrix.tradingmode }}
+  #      run: |
+  #        echo "::group::(post)list-data --show-timerange"
+  #        bash freqtrade.sh list-data --show-timerange --exchange ${{ matrix.exchange }}
+  #        echo "::endgroup::"
+
+  #    - name: Push changes
+  #      shell: bash
+  #      run: |
+  #        git config --global user.name 'github-actions[bot]'
+  #        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+  #        sudo chown -R $(id -u):$(id -g) user_data/data/${{ matrix.exchange }}
+  #        cd user_data/data/${{ matrix.exchange }}
+  #        echo "::group::Directory size data"
+  #        bytes=$(du -b --exclude .git -d 1 . | awk '{print $1}')
+  #        totalbytes=$(du -b -d 1 . | awk '{print $1}')
+  #        echo "Total Bytes: ${totalbytes}"
+  #        echo "Total excluding .git: ${bytes}"
+  #        echo "::endgroup::"
+  #        if [[ $(git status --porcelain . | wc -l) -gt 0 ]]; then
+  #          git add .
+  #          echo "::group::Comitting files"
+  #          git commit --amend -m "ci: Autoupdate $(date -u +'%F %T')"
+  #          echo "::endgroup::"
+  #          echo "::group::Push repository"
+  #          git push -u origin "$(git branch --show-current):${{ matrix.tradingmode }}/${{ matrix.exchange }}/${{ matrix.stake }}/${{ steps.info.outputs.timerange }}" --force
+  #          echo "::endgroup::"
+  #        fi
+  dispatch:
+    runs-on: ubuntu-latest
+    #needs: [update]
+    steps:
+      - id: info
+        shell: bash
+        run: |
+          timerange=$(date -u +%Y%m -d '- 1 month')
+          if [[ $(date -u +%d) == "01" ]]; then
+            echo "timerange=${timerange}" | tee -a ${GITHUB_OUTPUT}
+          fi
+      - name: Repository Dispatch backfill
+        uses: peter-evans/repository-dispatch@main
+        if: steps.info.outputs.timerange != ''
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          event-type: backfill
+          client-payload: '{"timerange": "${{ steps.info.outputs.timerange }}"}'
+
+      - name: Repository Dispatch backfill-long
+        uses: peter-evans/repository-dispatch@main
+        if: steps.info.outputs.timerange != ''
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          event-type: backfill-long
+          client-payload: '{"timerange": "${{ steps.info.outputs.timerange }}"}'
+
