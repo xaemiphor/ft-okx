@@ -4,6 +4,9 @@ on:
       timerange:
         description: '[yyyymm] Target month to download/backfill'
         required: true
+      cutoff:
+        description: '[yyyymm] Prefix cutoff. Ex 2020'
+        required: false
   repository_dispatch:
     types:
       - backfill-long
@@ -19,7 +22,7 @@ concurrency:
 
 env:
   timerange: ${{ github.event.client_payload.timerange || github.event.inputs.timerange }}
-  cutoff: 2020
+  cutoff: ${{ github.event.client_payload.cutoff || github.event.inputs.cutoff || '2020' }}
 
 jobs:
   info:
@@ -157,4 +160,4 @@ jobs:
           token: ${{ github.token }}
           repository: ${{ github.repository }}
           event-type: chain-long
-          client-payload: '{"timerange": "${{ steps.info.outputs.timerange }}"}'
+          client-payload: '{"timerange": "${{ steps.info.outputs.timerange }}", "cutoff": "${{ env.cutoff }}"}'
